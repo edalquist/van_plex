@@ -234,18 +234,35 @@ def transcode_video(
             logging.info(f"[DRY RUN] Would run command: {pretty_cmd}")
             return
 
-        process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8')
         
-        # Log ffmpeg output in real-time
+        output_lines = []
+        is_debug_enabled = logging.getLogger().isEnabledFor(logging.DEBUG)
+
+        # Log ffmpeg output in real-time if debug is enabled, and collect all output
         for line in process.stdout:
-            logging.debug(line.strip())
+            stripped_line = line.strip()
+            if is_debug_enabled:
+                logging.debug(stripped_line)
+            output_lines.append(stripped_line)
 
         process.wait()
 
         if process.returncode == 0:
             logging.info(f"Successfully transcoded '{destination_path}'")
         else:
-            logging.error(f"Failed to transcode '{local_source_path}'. ffmpeg exited with code {process.returncode}.")
+            # On failure, log the command and the full output at ERROR level
+            pretty_cmd = ' '.join(f"'{arg}'" if ' ' in arg else arg for arg in ffmpeg_cmd)
+            full_output = "\n".join(output_lines)
+            
+            error_message = (
+                f"Failed to transcode '{local_source_path}'.\n"
+                f"  Exit Code: {process.returncode}\n"
+                f"  Command: {pretty_cmd}\n"
+                f"  FFmpeg Output:\n"
+                f"{full_output}"
+            )
+            logging.error(error_message)
 
     except Exception as e:
         logging.error(f"An error occurred while processing '{video.title}': {e}", exc_info=True)
