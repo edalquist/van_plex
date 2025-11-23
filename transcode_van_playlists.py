@@ -22,7 +22,7 @@ except ImportError:
 from filename_cleaner import clean_filename
 
 
-def get_plex_videos(plex: PlexServer) -> List[Video]:
+def get_plex_videos(plex: PlexServer, reverse_sort: bool = False) -> List[Video]:
     """
     Connects to the Plex server and compiles a list of all unique video objects
     from the "Van" playlists of all users.
@@ -63,7 +63,7 @@ def get_plex_videos(plex: PlexServer) -> List[Video]:
             logging.warning(f"Could not process playlists for user '{user.title}'. They may not have accepted the library share. Error: {e}")
             continue
     # Sort the unique videos by their file path for deterministic processing
-    sorted_videos = sorted(list(all_videos), key=lambda video: video.media[0].parts[0].file)
+    sorted_videos = sorted(list(all_videos), key=lambda video: video.media[0].parts[0].file, reverse=reverse_sort)
             
     return sorted_videos
 
@@ -128,6 +128,7 @@ def transcode_video(
     video: Video,
     plex: PlexServer,
     media_dir: str,
+    local_media_dir: str,
     output_dir: str,
     dry_run: bool = False,
     use_qsv: bool = False
@@ -136,10 +137,18 @@ def transcode_video(
     Manages the transcoding of a single video file.
     """
     try:
-        source_path = video.media[0].parts[0].file
+        # This is the path as Plex sees it
+        plex_source_path = video.media[0].parts[0].file
         
+        # This is the path on the local machine running the script
+        relative_path = os.path.relpath(plex_source_path, media_dir)
+        local_source_path = os.path.join(local_media_dir, relative_path)
+
+        if not os.path.exists(local_source_path):
+            logging.error(f"Source file not found at local path: '{local_source_path}'. Skipping.")
+            return
+
         # 1. Construct destination path
-        relative_path = os.path.relpath(source_path, media_dir)
         dest_dir = os.path.join(output_dir, os.path.dirname(relative_path))
         
         # Get the original filename without extension
@@ -158,7 +167,7 @@ def transcode_video(
         destination_path = os.path.join(dest_dir, cleaned_filename + '.mkv')
 
         # 2. Check if file is valid
-        if is_transcode_valid(source_path, destination_path):
+        if is_transcode_valid(local_source_path, destination_path):
             logging.info(f"SKIPPING: Valid transcoded file already exists at '{destination_path}'")
             return
 
@@ -169,7 +178,7 @@ def transcode_video(
         # 4. Construct ffmpeg command
         ffmpeg_cmd = [
             'ffmpeg',
-            '-i', source_path
+            '-i', local_source_path
         ]
 
         # Video filters
@@ -215,7 +224,7 @@ def transcode_video(
             destination_path
         ])
         
-        logging.info(f"Transcoding '{source_path}' to '{destination_path}'")
+        logging.info(f"Transcoding '{local_source_path}' to '{destination_path}'")
 
 
         # 5. Execute command
@@ -236,7 +245,7 @@ def transcode_video(
         if process.returncode == 0:
             logging.info(f"Successfully transcoded '{destination_path}'")
         else:
-            logging.error(f"Failed to transcode '{source_path}'. ffmpeg exited with code {process.returncode}.")
+            logging.error(f"Failed to transcode '{local_source_path}'. ffmpeg exited with code {process.returncode}.")
 
     except Exception as e:
         logging.error(f"An error occurred while processing '{video.title}': {e}", exc_info=True)
@@ -267,7 +276,13 @@ def main():
     parser.add_argument(
         '--media-dir',
         type=str,
-        help='The base directory of the Plex library (e.g., /shared/plex-library/).'
+        help='The base directory of the Plex library AS SEEN BY PLEX (e.g., /shared/plex-library/).'
+    )
+    parser.add_argument(
+        '--local-media-dir',
+        type=str,
+        help='(Optional) The base directory of the Plex library on the local machine running this script. '
+             'Use this if the path is different from what Plex sees. If omitted, assumes the path is the same as --media-dir.'
     )
     parser.add_argument(
         '--output-dir',
@@ -288,6 +303,16 @@ def main():
         '--use-qsv',
         action='store_true',
         help='If set, attempt to use Intel QSV for HEVC hardware transcoding.'
+    )
+    parser.add_argument(
+        '--reverse-sort',
+        action='store_true',
+        help='If set, process files in reverse sorted order (Z-A) instead of A-Z.'
+    )
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug logging to see full ffmpeg output.'
     )
 
     args = parser.parse_args()
@@ -312,14 +337,19 @@ def main():
         'url': args.plex_url,
         'token': args.plex_token,
         'media_dir': args.media_dir,
+        'local_media_dir': args.local_media_dir,
         'output_dir': args.output_dir,
         'log_file': args.log_file,
     }
-    # a little bit of snake_case to kebab-case conversion
     config.update({k: v for k, v in cli_args.items() if v is not None})
 
+    # If local_media_dir is not specified, it defaults to media_dir
+    if 'local_media_dir' not in config or not config['local_media_dir']:
+        config['local_media_dir'] = config.get('media_dir')
+
+
     # --- Logging Setup ---
-    log_level = logging.INFO
+    log_level = logging.DEBUG if args.debug else logging.INFO
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
     
     # Get the root logger
@@ -357,7 +387,7 @@ def main():
         logging.info(f"Connecting to Plex server at {config['url']}...")
         plex = PlexServer(config['url'], config['token'])
         
-        videos_to_transcode = get_plex_videos(plex)
+        videos_to_transcode = get_plex_videos(plex, args.reverse_sort)
         
         if not videos_to_transcode:
             logging.info("No videos found in 'Van' playlists.")
@@ -371,6 +401,7 @@ def main():
                     video,
                     plex,
                     config['media_dir'],
+                    config['local_media_dir'],
                     config['output_dir'],
                     args.dry_run,
                     args.use_qsv
