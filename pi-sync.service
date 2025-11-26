@@ -1,0 +1,15 @@
+[Unit]
+Description=Raspberry Pi Media Sync Service
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /Users/edalquist/projects/vanlife/pi_sync.py
+WorkingDirectory=/Users/edalquist/projects/vanlife
+Restart=always
+User=edalquist
+# Group=your_group_here # Uncomment and set if you have a specific group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

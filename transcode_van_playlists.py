@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import re
+import tempfile
+import requests
 from typing import List, Optional, Set
 
 # Third-party libraries, assuming they will be installed via requirements.txt
@@ -136,6 +138,7 @@ def transcode_video(
     """
     Manages the transcoding of a single video file.
     """
+    temp_sub_path = None
     try:
         # This is the path as Plex sees it
         plex_source_path = video.media[0].parts[0].file
@@ -187,11 +190,28 @@ def transcode_video(
         # Subtitle filters
         subtitle_key = find_english_subtitle_stream(video, plex)
         if subtitle_key:
-            # Use Plex's transcoder endpoint for subtitles
-            subtitle_url = plex.url(subtitle_key) + f"?X-Plex-Token={plex._token}"
-            # Subtitles must be the first filter. We need to escape the subtitle file path for ffmpeg
-            video_filters = f"subtitles='{subtitle_url}',{video_filters}"
+            try:
+                subtitle_url = plex.url(subtitle_key) + f"?X-Plex-Token={plex._token}"
+                logging.info(f"Downloading subtitle from {subtitle_url}")
+                response = requests.get(subtitle_url, stream=True, timeout=20)
+                response.raise_for_status()
 
+                # Create a temporary file to store the subtitle
+                with tempfile.NamedTemporaryFile(mode='wb', suffix='.srt', delete=False) as temp_sub_file:
+                    temp_sub_path = temp_sub_file.name
+                    for chunk in response.iter_content(chunk_size=8192):
+                        temp_sub_file.write(chunk)
+                
+                logging.info(f"Subtitle downloaded to temporary file: {temp_sub_path}")
+                
+                # ffmpeg on Windows requires path escaping, this is safer for all platforms
+                escaped_path = temp_sub_path.replace('\\', '\\\\').replace(':', '\\:')
+                video_filters = f"subtitles='{escaped_path}',{video_filters}"
+
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Failed to download subtitle file: {e}. Transcoding without subtitles.")
+                temp_sub_path = None # Ensure it's not processed in finally block
+        
         ffmpeg_cmd.extend(['-vf', video_filters])
 
         # Audio filters
@@ -266,6 +286,13 @@ def transcode_video(
 
     except Exception as e:
         logging.error(f"An error occurred while processing '{video.title}': {e}", exc_info=True)
+    
+    finally:
+        # Ensure the temporary subtitle file is always cleaned up
+        if temp_sub_path and os.path.exists(temp_sub_path):
+            logging.info(f"Cleaning up temporary subtitle file: {temp_sub_path}")
+            os.remove(temp_sub_path)
+
 
 
 

@@ -1,0 +1,9 @@
+This is for a new script
+My goal is to rsync a folder of media files to a rasperry pi every time it comes online on the network.
+The script doing the rsync is running on a local server, it will connect to the rasperry pi via SSH key
+The local server will need to detect when the rapsberry pi joins the local network
+The raspberry pi has a hostname of van-media.home.dalquist.org
+The script should take a list of source > dest directory path pairs and rsync each pair
+Files that do not exist in the source should be removed from the dest
+This script should check for the presence of the pi fairly often, every few minutes ideally
+The script should be careful to not end up trying to run multiple times concurrently
