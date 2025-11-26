@@ -3,6 +3,7 @@
 import configparser
 import json
 import logging
+import re
 import subprocess
 import time
 from email.message import EmailMessage
@@ -129,6 +130,7 @@ def sync_directories(config):
         ssh_command = f"ssh -i {ssh_key_file}"
 
     full_output = []
+    any_changes = False
     for src, dest in sync_dirs.items():
         logging.info(f"Syncing {src} to {remote_target}:{dest}")
         try:
@@ -149,14 +151,32 @@ def sync_directories(config):
                 text=True,
             )
             logging.info(f"Successfully synced {src}")
-            if result.stdout:
-                full_output.append(f"--- Sync summary for {src} ---\n{result.stdout}")
+            
+            output_text = result.stdout.strip()
+            # Find where the summary stats start
+            stats_start_index = output_text.find("Number of files:")
+            
+            # Check for itemized changes (anything before the stats)
+            if stats_start_index > 0:
+                any_changes = True
+                full_output.append(f"--- Sync summary for {src} ---\n{output_text}")
+            else: # No itemized changes, check the stats for transfers
+                match = re.search(r"Number of files transferred: ([1-9]\d*)", output_text)
+                if match:
+                    any_changes = True
+                    full_output.append(f"--- Sync summary for {src} ---\n{output_text}")
+                else:
+                    logging.info(f"No changes for {src}")
+
         except subprocess.CalledProcessError as e:
             logging.error(f"Failed to sync {src}. Error: {e.stderr}")
             full_output.append(f"--- Sync FAILED for {src} ---\n{e.stderr}")
+            any_changes = True
 
-    if full_output:
+    if any_changes:
         send_email(config, "\n\n".join(full_output))
+    else:
+        logging.info("Sync run complete. No changes detected.")
 
 def validate_config(config):
     """Validates the configuration."""
