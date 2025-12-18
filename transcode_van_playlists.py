@@ -9,6 +9,7 @@ import sys
 import re
 import tempfile
 import requests
+import socket
 from typing import List, Optional, Set
 
 # Third-party libraries, assuming they will be installed via requirements.txt
@@ -22,6 +23,62 @@ except ImportError:
     sys.exit(1)
 
 from filename_cleaner import clean_filename
+
+
+def send_failure_email(
+    to_addr: Optional[str],
+    from_addr: Optional[str],
+    video_title: str,
+    source_path: str,
+    error_message: str
+):
+    """
+    Sends an email notification about a transcoding failure using sendmail.
+    """
+    if not to_addr or not from_addr:
+        logging.info("Mail 'to' or 'from' address not configured. Skipping email notification.")
+        return
+
+    try:
+        subject = f"Transcode Failure: {video_title}"
+        hostname = socket.gethostname()
+        
+        # Construct email body with headers
+        body = (
+            f"From: {from_addr}\n"
+            f"To: {to_addr}\n"
+            f"Subject: {subject}\n\n"
+            f"A critical error occurred while transcoding a file on {hostname}.\n\n"
+            f"Video Title: {video_title}\n"
+            f"Source File: {source_path}\n\n"
+            f"Error Details:\n"
+            f"--------------------------------------\n"
+            f"{error_message}\n"
+            f"--------------------------------------\n"
+        )
+        
+        # The -t flag tells sendmail to read recipients from the message headers
+        process = subprocess.Popen(
+            ['/usr/sbin/sendmail', '-t'], 
+            stdin=subprocess.PIPE, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        stdout, stderr = process.communicate(body)
+        
+        if process.returncode == 0:
+            logging.info(f"Successfully sent failure notification email to {to_addr}")
+        else:
+            logging.error(
+                f"Failed to send failure email via sendmail. Exit code: {process.returncode}\n"
+                f"  - Stderr: {stderr.strip()}\n"
+                f"  - Stdout: {stdout.strip()}"
+            )
+    except FileNotFoundError:
+        logging.error("sendmail command not found at /usr/sbin/sendmail. Cannot send email notification.")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while sending email: {e}", exc_info=True)
 
 
 def get_plex_videos(plex: PlexServer, reverse_sort: bool = False) -> List[Video]:
@@ -82,9 +139,10 @@ def find_english_subtitle_stream(video: Video, plex: PlexServer) -> Optional[str
     logging.info(f"No English subtitle stream found for '{video.title}'")
     return None
 
-def is_transcode_valid(source_path: str, dest_path: str) -> bool:
+def is_transcode_valid(source_path: str, dest_path: str, duration_tolerance_percent: float = 1.0) -> bool:
     """
     Checks if a transcoded file is valid by comparing its duration to the source file's duration.
+    A file is considered valid if its duration is within a certain percentage tolerance of the source.
     Requires ffprobe to be in the system's PATH.
     """
     if not os.path.exists(dest_path):
@@ -111,33 +169,47 @@ def is_transcode_valid(source_path: str, dest_path: str) -> bool:
     dest_duration = get_duration(dest_path)
 
     if source_duration is None or dest_duration is None:
-        logging.warning(f"Could not validate duration for '{dest_path}', assuming it's invalid.")
+        logging.warning(f"Could not validate duration for '{os.path.basename(dest_path)}', assuming it's invalid.")
         return False
 
-    # Check if durations are within a 1-second tolerance
-    if abs(source_duration - dest_duration) < 1.0:
+    # Avoid division by zero for very short/empty files
+    if source_duration == 0:
+        if dest_duration == 0:
+            return True
+        else:
+            logging.warning(f"Validation failed for '{os.path.basename(dest_path)}'. Source duration is 0 but destination is {dest_duration:.2f}s.")
+            return False
+
+    # Calculate percentage difference
+    duration_diff_percent = abs(source_duration - dest_duration) / source_duration * 100
+
+    if duration_diff_percent <= duration_tolerance_percent:
         return True
     else:
         logging.warning(
-            f"Validation failed for '{dest_path}'. "
-            f"Source duration: {source_duration:.2f}s, "
-            f"Destination duration: {dest_duration:.2f}s. "
-            "File will be re-transcoded."
+            f"Validation failed for '{os.path.basename(dest_path)}'. "
+            f"Duration difference is {duration_diff_percent:.2f}%, which is over the {duration_tolerance_percent}% threshold.\n"
+            f"  - Source duration: {source_duration:.2f}s\n"
+            f"  - Destination duration: {dest_duration:.2f}s"
         )
         return False
 
 def transcode_video(
     video: Video,
     plex: PlexServer,
-    media_dir: str,
-    local_media_dir: str,
-    output_dir: str,
+    config: dict,
     dry_run: bool = False,
     use_qsv: bool = False
 ):
     """
     Manages the transcoding of a single video file.
     """
+    media_dir = config['media_dir']
+    local_media_dir = config.get('local_media_dir') or config['media_dir']
+    output_dir = config['output_dir']
+    mail_to = config.get('mail_to')
+    mail_from = config.get('mail_from')
+
     temp_sub_path = None
     try:
         # This is the path as Plex sees it
@@ -169,10 +241,17 @@ def transcode_video(
         # Set the new extension and join parts to form the final path
         destination_path = os.path.join(dest_dir, cleaned_filename + '.mkv')
 
-        # 2. Check if file is valid
-        if is_transcode_valid(local_source_path, destination_path):
-            logging.info(f"SKIPPING: Valid transcoded file already exists at '{destination_path}'")
-            return
+        # 2. Check if a valid transcode already exists using the hybrid approach
+        if os.path.exists(destination_path):
+            source_is_newer = os.path.getmtime(local_source_path) > os.path.getmtime(destination_path)
+            if not source_is_newer and is_transcode_valid(local_source_path, destination_path):
+                logging.info(f"SKIPPING: Valid and up-to-date file exists: '{destination_path}'")
+                return
+            
+            if source_is_newer:
+                logging.info(f"Re-transcoding: Source file is newer ('{os.path.basename(local_source_path)}').")
+            else: # is_transcode_valid must have been false
+                logging.info(f"Re-transcoding: Existing file failed validation ('{os.path.basename(destination_path)}').")
 
         # 3. Create destination directory
         os.makedirs(dest_dir, exist_ok=True)
@@ -284,6 +363,15 @@ def transcode_video(
             )
             logging.error(error_message)
 
+            # Send email notification
+            send_failure_email(
+                to_addr=mail_to,
+                from_addr=mail_from,
+                video_title=video.title,
+                source_path=local_source_path,
+                error_message=error_message
+            )
+
     except Exception as e:
         logging.error(f"An error occurred while processing '{video.title}': {e}", exc_info=True)
     
@@ -339,6 +427,16 @@ def main():
         help='Path to a file for logging output.'
     )
     parser.add_argument(
+        '--mail-to',
+        type=str,
+        help='Email address to send failure notifications to.'
+    )
+    parser.add_argument(
+        '--mail-from',
+        type=str,
+        help='Email address to send failure notifications from.'
+    )
+    parser.add_argument(
         '--dry-run',
         action='store_true',
         help='If set, print the ffmpeg commands without executing them.'
@@ -375,6 +473,8 @@ def main():
             config.update(dict(config_parser['Plex']))
         if 'Paths' in config_parser:
             config.update(dict(config_parser['Paths']))
+        if 'Mail' in config_parser:
+            config.update(dict(config_parser['Mail']))
 
     # Override config file values with command-line arguments
     cli_args = {
@@ -384,6 +484,8 @@ def main():
         'local_media_dir': args.local_media_dir,
         'output_dir': args.output_dir,
         'log_file': args.log_file,
+        'mail_to': args.mail_to,
+        'mail_from': args.mail_from,
     }
     config.update({k: v for k, v in cli_args.items() if v is not None})
 
@@ -444,9 +546,7 @@ def main():
                 transcode_video(
                     video,
                     plex,
-                    config['media_dir'],
-                    config['local_media_dir'],
-                    config['output_dir'],
+                    config,
                     args.dry_run,
                     args.use_qsv
                 )

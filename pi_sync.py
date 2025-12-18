@@ -204,6 +204,9 @@ def main():
 
     sync_config = config["Sync"]
     check_interval = sync_config.getint("CheckIntervalSeconds", 60)
+    post_sync_interval = sync_config.getint("PostSyncSleepSeconds", 3600)
+    
+    sleep_interval = check_interval
 
     while True:
         if is_host_online(config):
@@ -212,16 +215,23 @@ def main():
                 logging.info("Lock acquired, starting sync.")
                 try:
                     sync_directories(config)
+                    # If sync completes, set the longer sleep interval
+                    sleep_interval = post_sync_interval
+                    logging.info(f"Sync process finished. Setting sleep interval to {sleep_interval} seconds.")
                 finally:
                     remove_lock(config)
-                    logging.info("Sync finished, lock released.")
+                    logging.info("Lock released.")
             else:
                 logging.warning("Could not acquire lock. Another sync may be in progress.")
+                # Host is up but busy, use short interval
+                sleep_interval = check_interval
         else:
             logging.info(f"Host {sync_config.get('RemoteHost')} is offline.")
+            # Host is offline, use short interval
+            sleep_interval = check_interval
 
-        logging.info(f"Sleeping for {check_interval} seconds.")
-        time.sleep(check_interval)
+        logging.info(f"Sleeping for {sleep_interval} seconds.")
+        time.sleep(sleep_interval)
 
 
 if __name__ == "__main__":

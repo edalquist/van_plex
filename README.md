@@ -16,6 +16,7 @@ This script is designed to synchronize media files from a local server to a Rasp
     *   `User`: The SSH username to use for the connection (e.g., `pi`).
     *   `SSHKeyFile`: The path to the SSH private key to use for the connection. If left blank, the system's default key will be used.
     *   `CheckIntervalSeconds`: How often (in seconds) the script should check if the Pi is online. Defaults to 60.
+    *   `PostSyncSleepSeconds`: How long (in seconds) the script should wait after a successful sync before checking again. Defaults to 3600.
     *   `SyncDirs`: A JSON object mapping local source paths to remote destination paths.
     *   `LockFile`: The path to the lock file to prevent concurrent runs.
     *   `LogFile`: The path to the log file.
